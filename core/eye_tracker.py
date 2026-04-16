@@ -31,11 +31,20 @@ class EyeTracker:
         # Calibration state
         # In normalized coords from webcam (0 to 1). 
         # Typically x is inverted because camera is mirrored
-        self.calibrated = False
-        self.calib_min_x = 0.4
-        self.calib_max_x = 0.6
-        self.calib_min_y = 0.4
-        self.calib_max_y = 0.6
+        # Neutral Calibration
+        self.neutral_x = 0.5
+        self.neutral_y = 0.5
+        self.neutral_calibrated = False
+        
+        # Smoothing and Velocity limits
+        self.alpha = 0.2  # Exponential velocity smoothing (damping)
+        self.sensitivity = 0.3  # Velocity multiplier (lowered per user request)
+        self.deadzone_threshold = 0.002
+        self.max_speed = 0.02 # Max cap speed per frame
+        self.smooth_x = 0.5
+        self.smooth_y = 0.5
+        self.vx = 0.0
+        self.vy = 0.0
         
         # Blink detection variables
         self.blink_threshold = 0.015 # Tune based on metric
@@ -62,12 +71,15 @@ class EyeTracker:
             self.face_mesh.close()
 
     def update_calibration(self, min_x, max_x, min_y, max_y):
-        self.calib_min_x = min_x
-        self.calib_max_x = max_x
-        self.calib_min_y = min_y
-        self.calib_max_y = max_y
-        self.calibrated = True
-        logger.info(f"Calibration updated: X({min_x}-{max_x}), Y({min_y}-{max_y})")
+        logger.info("Legacy absolute calibration bounds ignored in favor of relative dynamic calibration.")
+
+    def recenter(self):
+        self.neutral_calibrated = False
+        self.smooth_x = 0.5
+        self.smooth_y = 0.5
+        self.vx = 0.0
+        self.vy = 0.0
+        logger.info("Recalibrating neutral position and clearing velocity...")
 
     def _euclidean_distance(self, pt1, pt2):
         return math.sqrt((pt1.x - pt2.x)**2 + (pt1.y - pt2.y)**2)
@@ -142,32 +154,62 @@ class EyeTracker:
                     # Using landmarks[468] for left iris center, landmarks[473] for right iris center
                     # We can average them to find a stable central point.
                     try:
-                        iris_x = (landmarks[468].x + landmarks[473].x) / 2.0
-                        iris_y = (landmarks[468].y + landmarks[473].y) / 2.0
+                        # Head-based tracking logic: average of eyes and nose
+                        left_eye = landmarks[33]
+                        right_eye = landmarks[263]
+                        nose = landmarks[1]
                         
-                        # Normalize according to calibration
-                        x_range = self.calib_max_x - self.calib_min_x
-                        y_range = self.calib_max_y - self.calib_min_y
+                        face_x = (left_eye.x + right_eye.x + nose.x) / 3.0
+                        face_y = (left_eye.y + right_eye.y + nose.y) / 3.0
                         
-                        if x_range == 0 or y_range == 0:
-                            norm_x, norm_y = 0.5, 0.5
-                        else:
-                            norm_x = (iris_x - self.calib_min_x) / x_range
-                            norm_y = (iris_y - self.calib_min_y) / y_range
+                        if getattr(self, 'neutral_calibrated', False) == False:
+                            self.neutral_x = face_x
+                            self.neutral_y = face_y
+                            self.neutral_calibrated = True
+                            self.smooth_x, self.smooth_y = 0.5, 0.5
+                            self.vx, self.vy = 0.0, 0.0
+                            logger.info(f"Neutral calc initialized at X:{self.neutral_x:.3f}, Y:{self.neutral_y:.3f}")
                         
-                        # Clamp between 0 and 1
-                        norm_x = max(0.0, min(1.0, norm_x))
-                        norm_y = max(0.0, min(1.0, norm_y))
+                        dx = face_x - self.neutral_x
+                        dy = face_y - self.neutral_y
                         
+                        # Velocity target based calculation
+                        target_vx = 0.0
+                        target_vy = 0.0
+                        
+                        if abs(dx) > self.deadzone_threshold:
+                            target_vx = dx * self.sensitivity
+                        if abs(dy) > self.deadzone_threshold:
+                            target_vy = dy * self.sensitivity
+                            
+                        # Smooth velocities (Momentum/Damping)
+                        self.vx = self.vx * (1 - self.alpha) + target_vx * self.alpha
+                        self.vy = self.vy * (1 - self.alpha) + target_vy * self.alpha
+                        
+                        # Speed clamp jumps
+                        if self.vx > self.max_speed: self.vx = self.max_speed
+                        if self.vx < -self.max_speed: self.vx = -self.max_speed
+                        if self.vy > self.max_speed: self.vy = self.max_speed
+                        if self.vy < -self.max_speed: self.vy = -self.max_speed
+                        
+                        # Accumulate onto coordinates
+                        self.smooth_x += self.vx
+                        self.smooth_y += self.vy
+                        
+                        # Enforce bounds ensuring cursor doesn't leave screen
+                        self.smooth_x = max(0.0, min(1.0, self.smooth_x))
+                        self.smooth_y = max(0.0, min(1.0, self.smooth_y))
+
                         if self.on_move:
-                            self.on_move(norm_x, norm_y)
+                            self.on_move(self.smooth_x, self.smooth_y)
                             
                     except IndexError:
                         pass # No refined landmarks
                         
-            # Sleep a bit to prevent maxing out CPU without yielding
-            # cv2.waitKey(1) can be used or time.sleep
-            cv2.waitKey(1)
+            # Sleep and parse user requests directly to recenter
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('r'):
+                self.recenter()
 
 if __name__ == "__main__":
     def move_cb(x, y):
