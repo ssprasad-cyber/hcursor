@@ -1,6 +1,9 @@
 import pyautogui
 import logging
 import time
+import datetime
+import os
+import subprocess
 
 # Configure PyAutoGUI to be safe and responsive
 pyautogui.FAILSAFE = False # Disable fail-safe to prevent accidental crashes during eye tracking
@@ -20,6 +23,13 @@ class SystemController:
         # Cursor state for EMA smoothing
         self.current_x = None
         self.current_y = None
+        
+        # Edge Scrolling State
+        self.edge_scroll_margin = 50
+        self.edge_scroll_delay = 0.3
+        self.edge_scroll_start_time = None
+        self.edge_scroll_direction = None
+        self.last_scroll_time = None
         
         # Screen dimensions
         try:
@@ -84,19 +94,66 @@ class SystemController:
         except Exception as e:
             logger.error(f"Failed to double click: {e}")
 
-    def scroll(self, amount):
+    def scroll(self, amount, silent=False):
         """Scrolls vertically by the given amount (+ is up, - is down)."""
         try:
-            logger.info(f"Scrolling by {amount}")
-            pyautogui.scroll(amount)
+            if not silent:
+                logger.info(f"Scrolling by {amount}")
+            try:
+                from pynput.mouse import Controller
+                Controller().scroll(0, amount)
+            except ImportError:
+                pyautogui.scroll(amount * 100) # fallback
         except Exception as e:
-            logger.error(f"Failed to scroll: {e}")
+            if not silent:
+                logger.error(f"Failed to scroll: {e}")
+                
+    def check_edge_scroll(self, x, y):
+        """
+        Checks if the cursor is at the top or bottom edge and triggers continuous scrolling.
+        """
+        current_time = time.time()
+        
+        direction = None
+        if y < self.edge_scroll_margin:
+            direction = "up"
+        elif y > self.screen_height - self.edge_scroll_margin:
+            direction = "down"
+            
+        if direction:
+            if self.edge_scroll_direction != direction:
+                # Just entered the edge zone
+                self.edge_scroll_direction = direction
+                self.edge_scroll_start_time = current_time
+                self.last_scroll_time = current_time
+            else:
+                # Been at the edge for a while
+                elapsed_total = current_time - self.edge_scroll_start_time
+                if elapsed_total > self.edge_scroll_delay:
+                    # Speed multiplier increases the longer they stay at the edge (max 5x)
+                    speed_mult = min(5.0, 1.0 + (elapsed_total - self.edge_scroll_delay))
+                    
+                    # Scroll interval determines how frequently we send a scroll event
+                    # At 1x speed, 1 event every 0.1s. At 5x speed, 1 event every 0.02s
+                    scroll_interval = 0.1 / speed_mult
+                    
+                    if (current_time - self.last_scroll_time) > scroll_interval:
+                        amount = 1 if direction == "up" else -1
+                        self.scroll(amount, silent=True)
+                        self.last_scroll_time = current_time
+        else:
+            self.edge_scroll_direction = None
+            self.edge_scroll_start_time = None
             
     def type_text(self, text, interval=0.01):
         """Types out a given string."""
         try:
-            logger.info(f"Typing text: {text}")
-            pyautogui.write(text, interval=interval)
+            logger.info(f"Typing text: '{text}'")
+            try:
+                from pynput.keyboard import Controller
+                Controller().type(text)
+            except ImportError:
+                pyautogui.write(text, interval=interval)
         except Exception as e:
             logger.error(f"Failed to type text: {e}")
 
@@ -104,9 +161,43 @@ class SystemController:
         """Presses a specific key (e.g., 'enter', 'tab', 'esc')."""
         try:
             logger.info(f"Pressing key: {key}")
-            pyautogui.press(key)
+            try:
+                from pynput.keyboard import Controller, Key
+                keyboard = Controller()
+                if key == 'enter':
+                    keyboard.press(Key.enter)
+                    keyboard.release(Key.enter)
+                else:
+                    pyautogui.press(key)
+            except ImportError:
+                pyautogui.press(key)
         except Exception as e:
             logger.error(f"Failed to press key: {e}")
+
+    def center_cursor(self):
+        """Moves the cursor to the center of the screen."""
+        try:
+            logger.info("Centering cursor")
+            self.move_cursor(self.screen_width // 2, self.screen_height // 2)
+        except Exception as e:
+            logger.error(f"Failed to center cursor: {e}")
+
+    def take_screenshot(self, filename_prefix="screenshot"):
+        """Takes a screenshot and saves it locally using native tools."""
+        try:
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{filename_prefix}_{timestamp}.png"
+            logger.info(f"Taking screenshot: {filename}")
+            
+            # On Linux (Wayland/X11), native screenshot tools are more reliable than pyautogui
+            try:
+                subprocess.run(['gnome-screenshot', '-f', filename], check=True)
+            except Exception as e:
+                logger.warning(f"gnome-screenshot failed ({e}), falling back to pyautogui...")
+                pyautogui.screenshot(filename)
+                
+        except Exception as e:
+            logger.error(f"Failed to take screenshot: {e}")
 
 # Example usage
 if __name__ == "__main__":
