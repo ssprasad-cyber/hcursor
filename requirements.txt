@@ -1,7 +1,11 @@
 opencv-python==4.9.0.80
 mediapipe==0.10.11
-SpeechRecognition==3.10.1
 PyAutoGUI==0.9.54
 customtkinter==5.2.2
 Pillow==10.2.0
+sounddevice==0.5.5
+vosk==0.3.45
+pynput==1.8.1
+autocorrect==2.6.1
 pyaudio==0.2.14
+SpeechRecognition==3.10.1
